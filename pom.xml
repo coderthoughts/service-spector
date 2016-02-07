@@ -9,8 +9,8 @@
   <dependencies>
     <dependency>
       <groupId>org.osgi</groupId>
-      <artifactId>org.osgi.core</artifactId>
-      <version>6.0.0</version>
+      <artifactId>org.osgi.service.component.annotations</artifactId>
+      <version>1.3.0</version>
     </dependency>
   </dependencies>
 
@@ -23,7 +23,6 @@
         <extensions>true</extensions>
         <configuration>
           <instructions>
-            <Bundle-Activator>org.coderthoughts.service.spector.Activator</Bundle-Activator>
             <Export-Package />
           </instructions>
         </configuration>
