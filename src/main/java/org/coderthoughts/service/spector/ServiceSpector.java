@@ -29,6 +29,7 @@ import org.osgi.service.component.annotations.Deactivate;
 
 @Component(immediate=true)
 public class ServiceSpector implements ServiceListener {
+    // This property is put on the proxy so that it won't be proxied a second time
     private static final String PROXY_SERVICE_PROP = ".service.spector.proxy";
 
     BundleContext bundleContext;
@@ -54,9 +55,10 @@ public class ServiceSpector implements ServiceListener {
 
         bundleContext.addServiceListener(this);
 
-        System.out.println("%%@@@@@@@@@@@@@@@@");
+        visitExistingServices();
+
         System.out.println("Service filters: " + Arrays.toString(cfg.service_filters()));
-        System.out.println("Hide services: " + cfg.hide_services());
+        System.out.println("Hide services: " + cfg.hide_services()); // TODO implement this
     }
 
     @Deactivate
@@ -81,30 +83,49 @@ public class ServiceSpector implements ServiceListener {
         ServiceReference<?> ref = event.getServiceReference();
         switch (event.getType()) {
         case ServiceEvent.MODIFIED:
-            ServiceRegistration<?> reg = managed.remove(ref);
-            if (reg != null) {
-                reg.unregister();
-                bundleContext.ungetService(ref);
-            }
+            handleRemovedService(ref);
             // no break, continue as with REGISTERED
         case ServiceEvent.REGISTERED:
-            if (managed.get(ref) == null && ref.getProperty(PROXY_SERVICE_PROP) == null) {
-                Object svc = bundleContext.getService(ref);
-                for (Filter filter : filters) {
-                    if (filter.match(ref)) {
-                        managed.put(ref, registerProxy(ref, svc));
-                    }
-                }
-            }
+            handleNewService(ref);
             break;
         case ServiceEvent.MODIFIED_ENDMATCH:
         case ServiceEvent.UNREGISTERING:
-            ServiceRegistration<?> reg2 = managed.remove(ref);
-            if (reg2 != null) {
-                reg2.unregister();
-                bundleContext.ungetService(ref);
-            }
+            handleRemovedService(ref);
             break;
+        }
+    }
+
+    private void handleRemovedService(ServiceReference<?> ref) {
+        ServiceRegistration<?> reg2 = managed.remove(ref);
+        if (reg2 != null) {
+            reg2.unregister();
+            bundleContext.ungetService(ref);
+        }
+    }
+
+    private void handleNewService(ServiceReference<?> ref) {
+        if (managed.get(ref) == null && ref.getProperty(PROXY_SERVICE_PROP) == null) {
+            Object svc = bundleContext.getService(ref);
+            for (Filter filter : filters) {
+                if (filter.match(ref)) {
+                    managed.put(ref, registerProxy(ref, svc));
+                }
+            }
+        }
+    }
+
+    private void visitExistingServices() {
+        for (Filter filter : filters) {
+            try {
+                ServiceReference<?>[] refs = bundleContext.getServiceReferences((String) null, filter.toString());
+                if (refs != null) {
+                    for (ServiceReference<?> ref : refs) {
+                        handleNewService(ref);
+                    }
+                }
+            } catch (InvalidSyntaxException e) {
+                e.printStackTrace();
+            }
         }
     }
 
