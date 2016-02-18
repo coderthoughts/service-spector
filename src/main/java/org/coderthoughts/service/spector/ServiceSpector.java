@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Dictionary;
+import java.util.HashMap;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Map;
@@ -29,8 +30,26 @@ import org.osgi.service.component.annotations.Deactivate;
 
 @Component(immediate=true)
 public class ServiceSpector implements ServiceListener {
+    private static final String COUNTER_ASPECT = "COUNTER";
+
     // This property is put on the proxy so that it won't be proxied a second time
     private static final String PROXY_SERVICE_PROP = ".service.spector.proxy";
+
+    private final Map<String, InvocationHandler> invocationHandlers; {
+        Map<String, InvocationHandler> m = new HashMap<>();
+        m.put(COUNTER_ASPECT, new InvocationHandler() {
+            @Override
+            public Object invoke(Object org, Method method, Object[] args) throws Throwable {
+                Class<?> declaringClass = method.getDeclaringClass();
+                if (!declaringClass.equals(Object.class)) {
+                    String key = declaringClass.getSimpleName() + "#" + method.getName();
+                    invocationCounts.computeIfAbsent(key, k -> new LongAdder()).increment();
+                }
+                return method.invoke(org, args);
+            }
+        });
+        invocationHandlers = Collections.unmodifiableMap(m);
+    }
 
     BundleContext bundleContext;
     Config config;
@@ -42,6 +61,8 @@ public class ServiceSpector implements ServiceListener {
     private void activate(BundleContext bc, Config cfg) {
         bundleContext = bc;
         config = cfg;
+        if (cfg == null || cfg.service_filters() == null)
+            return;
 
         List<Filter> fl = new ArrayList<>(cfg.service_filters().length);
         for (String f : cfg.service_filters()) {
@@ -54,7 +75,6 @@ public class ServiceSpector implements ServiceListener {
         filters = Collections.unmodifiableList(fl);
 
         bundleContext.addServiceListener(this);
-
         visitExistingServices();
 
         System.out.println("Service filters: " + Arrays.toString(cfg.service_filters()));
@@ -67,8 +87,9 @@ public class ServiceSpector implements ServiceListener {
         bundleContext = null;
         config = null;
         filters = null;
-        for (ServiceRegistration<?> sr : managed.values()) {
-            sr.unregister();
+        for (Map.Entry<ServiceReference<?>, ServiceRegistration<?>> entry : managed.entrySet()) {
+            entry.getValue().unregister();
+            bundleContext.ungetService(entry.getKey());
         }
 
         System.out.println("Invocation counts");
@@ -108,7 +129,7 @@ public class ServiceSpector implements ServiceListener {
             Object svc = bundleContext.getService(ref);
             for (Filter filter : filters) {
                 if (filter.match(ref)) {
-                    managed.put(ref, registerProxy(ref, svc));
+                    managed.put(ref, registerProxy(ref, svc, invocationHandlers.get(COUNTER_ASPECT)));
                 }
             }
         }
@@ -129,7 +150,7 @@ public class ServiceSpector implements ServiceListener {
         }
     }
 
-    private ServiceRegistration<?> registerProxy(ServiceReference<?> ref, Object svc) {
+    private ServiceRegistration<?> registerProxy(ServiceReference<?> ref, Object svc, InvocationHandler ih) {
         String[] objectClass = null;
         Integer ranking = 0;
 
@@ -170,33 +191,36 @@ public class ServiceSpector implements ServiceListener {
             }
         }
 
-        Object proxy = createProxy(ref.getBundle(), interfaces, svc);
-        return bundleContext.registerService(
+        Object proxy = createProxy(ref.getBundle(), interfaces, svc, ih);
+        return ref.getBundle().getBundleContext().registerService(
                 interfaces.stream().map(Class::getName).toArray(String[]::new),
                 proxy, newProps);
     }
 
-    private Object createProxy(Bundle bundle, List<Class<?>> interfaces, Object svc) {
+    private Object createProxy(Bundle bundle, List<Class<?>> interfaces, Object svc, InvocationHandler ih) {
         BundleWiring bw = bundle.adapt(BundleWiring.class);
         ClassLoader cl = bw.getClassLoader();
+        return Proxy.newProxyInstance(cl, interfaces.toArray(new Class[]{}), new InvocationHandlerOriginal(svc, ih));
+    }
 
-        return Proxy.newProxyInstance(cl, interfaces.toArray(new Class[]{}), new InvocationHandler() {
-            @Override
-            public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-                // TODO make better
-                String key = method.getDeclaringClass().getSimpleName() + "#" + method.getName();
-                LongAdder la = new LongAdder();
-                LongAdder prev = invocationCounts.putIfAbsent(key, la);
-                if (prev != null)
-                    la = prev;
-                la.increment();
-                return method.invoke(svc, args);
-            }
-        });
+    // An invocation handler that provides the original object in the invoke() method rather than the proxy
+    static class InvocationHandlerOriginal implements InvocationHandler {
+        private final Object original;
+        private final InvocationHandler invocationHandler;
+
+        public InvocationHandlerOriginal(Object obj, InvocationHandler ih) {
+            original = obj;
+            invocationHandler = ih;
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            return invocationHandler.invoke(original, method, args);
+        }
     }
 
     @interface Config {
-        String [] service_filters() default {};
+        String [] service_filters();
         boolean hide_services() default false;
     }
 }
