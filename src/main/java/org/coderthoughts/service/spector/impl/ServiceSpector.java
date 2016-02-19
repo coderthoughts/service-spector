@@ -40,9 +40,7 @@ public class ServiceSpector implements ServiceListener {
     BundleContext bundleContext;
     List<Filter> filters;
     ServiceRegistration<?> hookReg;
-    Map<ServiceReference<?>, ServiceRegistration<?>> managed = new ConcurrentHashMap<>();
-
-    @Reference(policy=ReferencePolicy.DYNAMIC, cardinality=ReferenceCardinality.AT_LEAST_ONE)
+    final Map<ServiceReference<?>, ServiceRegistration<?>> managed = new ConcurrentHashMap<>();
     final List<ServiceAspect> aspects = new CopyOnWriteArrayList<>();
 
     @Activate
@@ -90,10 +88,20 @@ public class ServiceSpector implements ServiceListener {
             hookReg.unregister();
             hookReg = null;
         }
+    }
 
-        for (ServiceAspect aspect : aspects) {
-            aspect.report();
-        }
+    @Reference(policy=ReferencePolicy.DYNAMIC, cardinality=ReferenceCardinality.AT_LEAST_ONE)
+    void bindServiceAspect(ServiceAspect sa) {
+        aspects.add(sa);
+    }
+
+    void unbindServiceAspect(ServiceAspect sa) {
+        aspects.remove(sa);
+        sa.report();
+    }
+
+    List<ServiceAspect> getAspects() {
+        return aspects;
     }
 
     @Override
@@ -218,7 +226,7 @@ public class ServiceSpector implements ServiceListener {
         BundleWiring bw = bundle.adapt(BundleWiring.class);
         ClassLoader cl = bw.getClassLoader();
         return Proxy.newProxyInstance(cl,
-                interfaces.toArray(new Class[]{}), new AllAspectsHandler(aspects, svc));
+                interfaces.toArray(new Class[]{}), new AllAspectsHandler(this, svc));
     }
 
     @interface Config {

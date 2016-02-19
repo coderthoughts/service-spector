@@ -32,5 +32,6 @@ public class CountingServiceAspect implements ServiceAspect {
         for (Map.Entry<String, LongAdder> entry : invocationCounts.entrySet()) {
             System.out.println(entry.getKey() + ": " + entry.getValue());
         }
+        System.out.println();
     }
 }
