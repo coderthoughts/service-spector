@@ -1,7 +1,5 @@
 package org.coderthoughts.service.spector.impl;
 
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -11,6 +9,7 @@ import java.util.Hashtable;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.coderthoughts.service.spector.ServiceAspect;
 import org.osgi.framework.Bundle;
@@ -44,7 +43,7 @@ public class ServiceSpector implements ServiceListener {
     Map<ServiceReference<?>, ServiceRegistration<?>> managed = new ConcurrentHashMap<>();
 
     @Reference(policy=ReferencePolicy.DYNAMIC, cardinality=ReferenceCardinality.AT_LEAST_ONE)
-    volatile List<ServiceAspect> aspects;
+    final List<ServiceAspect> aspects = new CopyOnWriteArrayList<>();
 
     @Activate
     private synchronized void activate(BundleContext bc, Config cfg) {
@@ -218,46 +217,8 @@ public class ServiceSpector implements ServiceListener {
     private Object createProxy(Bundle bundle, List<Class<?>> interfaces, Object svc) {
         BundleWiring bw = bundle.adapt(BundleWiring.class);
         ClassLoader cl = bw.getClassLoader();
-        return Proxy.newProxyInstance(cl, interfaces.toArray(new Class[]{}), new AllAspectsHandler(svc));
-    }
-
-    // An invocation handler that provides the original object in the invoke() method rather than the proxy
-    class AllAspectsHandler implements InvocationHandler {
-        private final Object original;
-
-        public AllAspectsHandler(Object obj) {
-            original = obj;
-        }
-
-        @Override
-        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            Class<?> declaringClass = method.getDeclaringClass();
-            boolean objectMethod = declaringClass.equals(Object.class);
-
-            if (!objectMethod) {
-                for (ServiceAspect aspect : aspects) {
-                    try {
-                        aspect.preServiceInvoke(original, method, args);
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                    }
-                }
-            }
-
-            Object res = method.invoke(original, args);
-
-            if (!objectMethod) {
-                for (ServiceAspect aspect : aspects) {
-                    try {
-                        aspect.postServiceInvoke(original, method, args, res);
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                    }
-                }
-            }
-
-            return res;
-        }
+        return Proxy.newProxyInstance(cl,
+                interfaces.toArray(new Class[]{}), new AllAspectsHandler(aspects, svc));
     }
 
     @interface Config {
