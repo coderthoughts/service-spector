@@ -19,8 +19,8 @@ import org.osgi.framework.BundleContext;
 import org.osgi.framework.Constants;
 import org.osgi.framework.Filter;
 import org.osgi.framework.InvalidSyntaxException;
+import org.osgi.framework.PrototypeServiceFactory;
 import org.osgi.framework.ServiceEvent;
-import org.osgi.framework.ServiceFactory;
 import org.osgi.framework.ServiceListener;
 import org.osgi.framework.ServiceReference;
 import org.osgi.framework.ServiceRegistration;
@@ -188,7 +188,15 @@ public class ServiceSpector implements ServiceListener {
         }
         ranking++;
 
+        // Register the service with the new higher ranking
         newProps.put(Constants.SERVICE_RANKING, ranking);
+
+        // Always register as a prototype scope service, this will also work for proxied
+        // services that are non-prototype
+        newProps.put(Constants.SERVICE_SCOPE, Constants.SCOPE_PROTOTYPE);
+
+        // This property is set to recognize the registration as a proxy, so it's not
+        // proxied again
         newProps.put(PROXY_SERVICE_PROP, Boolean.TRUE);
 
         List<Class<?>> interfaces = new ArrayList<>();
@@ -203,7 +211,7 @@ public class ServiceSpector implements ServiceListener {
             }
         }
 
-        ServiceFactory<Object> serviceFactory = new ServiceFactory<Object>() {
+        PrototypeServiceFactory<Object> psf = new PrototypeServiceFactory<Object>() {
             @Override
             public Object getService(Bundle bundle, ServiceRegistration<Object> registration) {
                 Object originalService = bundle.getBundleContext().getService(originalRef);
@@ -215,9 +223,10 @@ public class ServiceSpector implements ServiceListener {
                 bundle.getBundleContext().ungetService(originalRef);
             }
         };
+
         return originalRef.getBundle().getBundleContext().registerService(
                 interfaces.stream().map(Class::getName).toArray(String[]::new),
-                serviceFactory, newProps);
+                psf, newProps);
     }
 
     private Object createProxy(Bundle bundle, List<Class<?>> interfaces, Object svc, InvocationHandler ih) {
