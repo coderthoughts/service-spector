@@ -1,4 +1,4 @@
-package org.coderthoughts.service.spector;
+package org.coderthoughts.service.spector.impl;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -7,13 +7,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Dictionary;
-import java.util.HashMap;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.LongAdder;
 
+import org.coderthoughts.service.spector.ServiceAspect;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.Constants;
@@ -30,42 +29,29 @@ import org.osgi.framework.wiring.BundleWiring;
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
 import org.osgi.service.component.annotations.Deactivate;
+import org.osgi.service.component.annotations.Reference;
+import org.osgi.service.component.annotations.ReferenceCardinality;
+import org.osgi.service.component.annotations.ReferencePolicy;
 
 @Component(immediate=true)
 public class ServiceSpector implements ServiceListener {
-    private static final String COUNTING_ASPECT = "COUNTING";
-
     // This property is put on the proxy so that it won't be proxied a second time
     private static final String PROXY_SERVICE_PROP = ".service.spector.proxy";
-
-    private final Map<String, InvocationHandler> invocationHandlers; {
-        Map<String, InvocationHandler> m = new HashMap<>();
-        m.put(COUNTING_ASPECT, new InvocationHandler() {
-            @Override
-            public Object invoke(Object org, Method method, Object[] args) throws Throwable {
-                Class<?> declaringClass = method.getDeclaringClass();
-                if (!declaringClass.equals(Object.class)) {
-                    String key = declaringClass.getSimpleName() + "#" + method.getName();
-                    invocationCounts.computeIfAbsent(key, k -> new LongAdder()).increment();
-                }
-                return method.invoke(org, args);
-            }
-        });
-        invocationHandlers = Collections.unmodifiableMap(m);
-    }
 
     BundleContext bundleContext;
     List<Filter> filters;
     ServiceRegistration<?> hookReg;
     Map<ServiceReference<?>, ServiceRegistration<?>> managed = new ConcurrentHashMap<>();
-    Map<String, LongAdder> invocationCounts = new ConcurrentHashMap<>();
+
+    @Reference(policy=ReferencePolicy.DYNAMIC, cardinality=ReferenceCardinality.AT_LEAST_ONE)
+    volatile List<ServiceAspect> aspects;
 
     @Activate
     private synchronized void activate(BundleContext bc, Config cfg) {
+        bundleContext = bc;
         if (cfg == null || cfg.service_filters() == null)
             return;
 
-        bundleContext = bc;
         if (cfg.hide_services()) {
             hookReg = bundleContext.registerService(new String[] {FindHook.class.getName(), EventListenerHook.class.getName()},
                 new HidingHook(bundleContext, managed), null);
@@ -84,8 +70,10 @@ public class ServiceSpector implements ServiceListener {
         bundleContext.addServiceListener(this);
         visitExistingServices();
 
+        System.out.println("Service Spector");
+        System.out.println("===============");
         System.out.println("Service filters: " + Arrays.toString(cfg.service_filters()));
-        System.out.println("Hide services: " + cfg.hide_services()); // TODO implement this
+        System.out.println("Hide services: " + cfg.hide_services());
     }
 
     @Deactivate
@@ -104,10 +92,8 @@ public class ServiceSpector implements ServiceListener {
             hookReg = null;
         }
 
-        System.out.println("Invocation counts");
-        System.out.println("=================");
-        for (Map.Entry<String, LongAdder> entry : invocationCounts.entrySet()) {
-            System.out.println(entry.getKey() + ": " + entry.getValue());
+        for (ServiceAspect aspect : aspects) {
+            aspect.report();
         }
     }
 
@@ -141,7 +127,7 @@ public class ServiceSpector implements ServiceListener {
             Object svc = bundleContext.getService(ref);
             for (Filter filter : filters) {
                 if (filter.match(ref)) {
-                    managed.put(ref, registerProxy(ref, svc, invocationHandlers.get(COUNTING_ASPECT)));
+                    managed.put(ref, registerProxy(ref, svc));
                 }
             }
         }
@@ -162,7 +148,7 @@ public class ServiceSpector implements ServiceListener {
         }
     }
 
-    private ServiceRegistration<?> registerProxy(ServiceReference<?> originalRef, Object svc, InvocationHandler ih) {
+    private ServiceRegistration<?> registerProxy(ServiceReference<?> originalRef, Object svc) {
         String[] objectClass = null;
         Integer ranking = 0;
 
@@ -215,7 +201,7 @@ public class ServiceSpector implements ServiceListener {
             @Override
             public Object getService(Bundle bundle, ServiceRegistration<Object> registration) {
                 Object originalService = bundle.getBundleContext().getService(originalRef);
-                return createProxy(originalRef.getBundle(), interfaces, originalService, ih);
+                return createProxy(originalRef.getBundle(), interfaces, originalService);
             }
 
             @Override
@@ -229,25 +215,48 @@ public class ServiceSpector implements ServiceListener {
                 psf, newProps);
     }
 
-    private Object createProxy(Bundle bundle, List<Class<?>> interfaces, Object svc, InvocationHandler ih) {
+    private Object createProxy(Bundle bundle, List<Class<?>> interfaces, Object svc) {
         BundleWiring bw = bundle.adapt(BundleWiring.class);
         ClassLoader cl = bw.getClassLoader();
-        return Proxy.newProxyInstance(cl, interfaces.toArray(new Class[]{}), new InvocationHandlerOriginal(svc, ih));
+        return Proxy.newProxyInstance(cl, interfaces.toArray(new Class[]{}), new AllAspectsHandler(svc));
     }
 
     // An invocation handler that provides the original object in the invoke() method rather than the proxy
-    static class InvocationHandlerOriginal implements InvocationHandler {
+    class AllAspectsHandler implements InvocationHandler {
         private final Object original;
-        private final InvocationHandler invocationHandler;
 
-        public InvocationHandlerOriginal(Object obj, InvocationHandler ih) {
+        public AllAspectsHandler(Object obj) {
             original = obj;
-            invocationHandler = ih;
         }
 
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            return invocationHandler.invoke(original, method, args);
+            Class<?> declaringClass = method.getDeclaringClass();
+            boolean objectMethod = declaringClass.equals(Object.class);
+
+            if (!objectMethod) {
+                for (ServiceAspect aspect : aspects) {
+                    try {
+                        aspect.preServiceInvoke(original, method, args);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+
+            Object res = method.invoke(original, args);
+
+            if (!objectMethod) {
+                for (ServiceAspect aspect : aspects) {
+                    try {
+                        aspect.postServiceInvoke(original, method, args, res);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+
+            return res;
         }
     }
 

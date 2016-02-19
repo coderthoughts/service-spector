@@ -1,4 +1,4 @@
-package org.coderthoughts.service.spector;
+package org.coderthoughts.service.spector.impl;
 
 import java.util.Collection;
 import java.util.Iterator;
