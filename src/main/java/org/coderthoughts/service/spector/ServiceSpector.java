@@ -20,9 +20,12 @@ import org.osgi.framework.Constants;
 import org.osgi.framework.Filter;
 import org.osgi.framework.InvalidSyntaxException;
 import org.osgi.framework.ServiceEvent;
+import org.osgi.framework.ServiceFactory;
 import org.osgi.framework.ServiceListener;
 import org.osgi.framework.ServiceReference;
 import org.osgi.framework.ServiceRegistration;
+import org.osgi.framework.hooks.service.EventListenerHook;
+import org.osgi.framework.hooks.service.FindHook;
 import org.osgi.framework.wiring.BundleWiring;
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
@@ -30,14 +33,14 @@ import org.osgi.service.component.annotations.Deactivate;
 
 @Component(immediate=true)
 public class ServiceSpector implements ServiceListener {
-    private static final String COUNTER_ASPECT = "COUNTER";
+    private static final String COUNTING_ASPECT = "COUNTING";
 
     // This property is put on the proxy so that it won't be proxied a second time
     private static final String PROXY_SERVICE_PROP = ".service.spector.proxy";
 
     private final Map<String, InvocationHandler> invocationHandlers; {
         Map<String, InvocationHandler> m = new HashMap<>();
-        m.put(COUNTER_ASPECT, new InvocationHandler() {
+        m.put(COUNTING_ASPECT, new InvocationHandler() {
             @Override
             public Object invoke(Object org, Method method, Object[] args) throws Throwable {
                 Class<?> declaringClass = method.getDeclaringClass();
@@ -52,17 +55,21 @@ public class ServiceSpector implements ServiceListener {
     }
 
     BundleContext bundleContext;
-    Config config;
     List<Filter> filters;
+    ServiceRegistration<?> hookReg;
     Map<ServiceReference<?>, ServiceRegistration<?>> managed = new ConcurrentHashMap<>();
     Map<String, LongAdder> invocationCounts = new ConcurrentHashMap<>();
 
     @Activate
-    private void activate(BundleContext bc, Config cfg) {
-        bundleContext = bc;
-        config = cfg;
+    private synchronized void activate(BundleContext bc, Config cfg) {
         if (cfg == null || cfg.service_filters() == null)
             return;
+
+        bundleContext = bc;
+        if (cfg.hide_services()) {
+            hookReg = bundleContext.registerService(new String[] {FindHook.class.getName(), EventListenerHook.class.getName()},
+                new HidingHook(bundleContext, managed), null);
+        }
 
         List<Filter> fl = new ArrayList<>(cfg.service_filters().length);
         for (String f : cfg.service_filters()) {
@@ -82,14 +89,19 @@ public class ServiceSpector implements ServiceListener {
     }
 
     @Deactivate
-    private void deactivate() {
+    private synchronized void deactivate() {
         bundleContext.removeServiceListener(this);
-        bundleContext = null;
-        config = null;
         filters = null;
         for (Map.Entry<ServiceReference<?>, ServiceRegistration<?>> entry : managed.entrySet()) {
             entry.getValue().unregister();
             bundleContext.ungetService(entry.getKey());
+        }
+        managed.clear();
+        bundleContext = null;
+
+        if (hookReg != null) {
+            hookReg.unregister();
+            hookReg = null;
         }
 
         System.out.println("Invocation counts");
@@ -129,7 +141,7 @@ public class ServiceSpector implements ServiceListener {
             Object svc = bundleContext.getService(ref);
             for (Filter filter : filters) {
                 if (filter.match(ref)) {
-                    managed.put(ref, registerProxy(ref, svc, invocationHandlers.get(COUNTER_ASPECT)));
+                    managed.put(ref, registerProxy(ref, svc, invocationHandlers.get(COUNTING_ASPECT)));
                 }
             }
         }
@@ -150,13 +162,13 @@ public class ServiceSpector implements ServiceListener {
         }
     }
 
-    private ServiceRegistration<?> registerProxy(ServiceReference<?> ref, Object svc, InvocationHandler ih) {
+    private ServiceRegistration<?> registerProxy(ServiceReference<?> originalRef, Object svc, InvocationHandler ih) {
         String[] objectClass = null;
         Integer ranking = 0;
 
         Dictionary<String, Object> newProps = new Hashtable<>();
-        for (String key : ref.getPropertyKeys()) {
-            Object val = ref.getProperty(key);
+        for (String key : originalRef.getPropertyKeys()) {
+            Object val = originalRef.getProperty(key);
             switch(key) {
             case Constants.SERVICE_ID:
             case Constants.SERVICE_PID:
@@ -170,7 +182,7 @@ public class ServiceSpector implements ServiceListener {
                     objectClass = (String[]) val;
                 break;
             default:
-                newProps.put(key, ref.getProperty(key));
+                newProps.put(key, originalRef.getProperty(key));
                 break;
             }
         }
@@ -182,7 +194,7 @@ public class ServiceSpector implements ServiceListener {
         List<Class<?>> interfaces = new ArrayList<>();
         for (String intf : objectClass) {
             try {
-                Class<?> cls = ref.getBundle().loadClass(intf);
+                Class<?> cls = originalRef.getBundle().loadClass(intf);
                 if (!cls.isInterface())
                     continue;
                 interfaces.add(cls);
@@ -191,10 +203,21 @@ public class ServiceSpector implements ServiceListener {
             }
         }
 
-        Object proxy = createProxy(ref.getBundle(), interfaces, svc, ih);
-        return ref.getBundle().getBundleContext().registerService(
+        ServiceFactory<Object> serviceFactory = new ServiceFactory<Object>() {
+            @Override
+            public Object getService(Bundle bundle, ServiceRegistration<Object> registration) {
+                Object originalService = bundle.getBundleContext().getService(originalRef);
+                return createProxy(originalRef.getBundle(), interfaces, originalService, ih);
+            }
+
+            @Override
+            public void ungetService(Bundle bundle, ServiceRegistration<Object> registration, Object service) {
+                bundle.getBundleContext().ungetService(originalRef);
+            }
+        };
+        return originalRef.getBundle().getBundleContext().registerService(
                 interfaces.stream().map(Class::getName).toArray(String[]::new),
-                proxy, newProps);
+                serviceFactory, newProps);
     }
 
     private Object createProxy(Bundle bundle, List<Class<?>> interfaces, Object svc, InvocationHandler ih) {
