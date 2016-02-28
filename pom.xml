@@ -6,6 +6,13 @@
   <version>1.0.0-SNAPSHOT</version>
   <packaging>bundle</packaging>
 
+  <scm>
+    <connection>scm:git:git@github.com:coderthoughts/service-spector.git</connection>
+    <developerConnection>scm:git:git@github.com:coderthoughts/service-spector.git</developerConnection>
+    <url>https://github.com/coderthoughts/service-spector/tree/master</url>
+    <tag>HEAD</tag>
+  </scm>
+
   <dependencies>
     <dependency>
       <groupId>org.osgi</groupId>
