@@ -4,16 +4,20 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 
 import org.coderthoughts.service.spector.ServiceAspect;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.ServiceReference;
 
 class AllAspectsHandler implements InvocationHandler {
+    private final BundleContext bundleContext;
     private final ServiceSpector serviceSpector;
 
-    // The original service
-    private final Object original;
+    // A reference to the original service
+    private final ServiceReference<?> original;
 
-    public AllAspectsHandler(ServiceSpector spector, Object obj) {
+    AllAspectsHandler(BundleContext bc, ServiceSpector spector, ServiceReference<?> ref) {
+        bundleContext = bc;
         serviceSpector = spector;
-        original = obj;
+        original = ref;
     }
 
     @Override
@@ -31,7 +35,13 @@ class AllAspectsHandler implements InvocationHandler {
             }
         }
 
-        Object res = method.invoke(original, args);
+        Object res = null;
+        try {
+            Object svc = bundleContext.getService(original);
+            res = method.invoke(svc, args);
+        } finally {
+            bundleContext.ungetService(original);
+        }
 
         if (!objectMethod) {
             for (ServiceAspect aspect : serviceSpector.getAspects()) {

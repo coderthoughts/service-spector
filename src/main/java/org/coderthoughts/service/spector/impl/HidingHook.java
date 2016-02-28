@@ -7,30 +7,31 @@ import java.util.Map;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceEvent;
 import org.osgi.framework.ServiceReference;
-import org.osgi.framework.ServiceRegistration;
 import org.osgi.framework.hooks.service.EventListenerHook;
 import org.osgi.framework.hooks.service.FindHook;
 import org.osgi.framework.hooks.service.ListenerHook.ListenerInfo;
 
-public class HidingHook implements FindHook, EventListenerHook {
+class HidingHook implements FindHook, EventListenerHook {
     private final long myBundleId;
-    private final Map<ServiceReference<?>, ServiceRegistration<?>> managedServices;
+    private final ServiceSpector serviceSpector;
 
-    HidingHook(BundleContext bc, Map<ServiceReference<?>, ServiceRegistration<?>> managed) {
+    HidingHook(BundleContext bc, ServiceSpector spector) {
         myBundleId = bc.getBundle().getBundleId();
-        managedServices = managed;
+        serviceSpector = spector;
     }
 
     @Override
     public void find(BundleContext context, String name, String filter, boolean allServices,
             Collection<ServiceReference<?>> references) {
         long id = context.getBundle().getBundleId();
+
+        // Don't hide from me not the system bundle.
         if (id == 0 || id == myBundleId)
             return;
 
         for (Iterator<ServiceReference<?>> it = references.iterator(); it.hasNext(); ) {
             ServiceReference<?> ref = it.next();
-            if (managedServices.containsKey(ref))
+            if (serviceSpector.managed.containsKey(ref))
                 it.remove();
         }
     }
@@ -45,7 +46,7 @@ public class HidingHook implements FindHook, EventListenerHook {
             if (id == 0 || id == myBundleId)
                 continue;
 
-            if (managedServices.containsKey(ref))
+            if (serviceSpector.managed.containsKey(ref))
                 it.remove();
         }
     }

@@ -3,7 +3,6 @@ package org.coderthoughts.service.spector.impl;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.Dictionary;
 import java.util.Hashtable;
 import java.util.List;
@@ -34,14 +33,20 @@ import org.osgi.service.component.annotations.ReferencePolicy;
 
 @Component(immediate=true)
 public class ServiceSpector implements ServiceListener {
+    // This API is populated by Config Admin with configuration information
+    @interface Config {
+        String [] service_filters();
+        boolean hide_services() default false;
+    }
+
     // This property is put on the proxy so that it won't be proxied a second time
     private static final String PROXY_SERVICE_PROP = ".service.spector.proxy";
 
     BundleContext bundleContext;
-    List<Filter> filters;
     ServiceRegistration<?> hookReg;
-    final Map<ServiceReference<?>, ServiceRegistration<?>> managed = new ConcurrentHashMap<>();
     final List<ServiceAspect> aspects = new CopyOnWriteArrayList<>();
+    final List<Filter> filters = new CopyOnWriteArrayList<>();
+    final Map<ServiceReference<?>, ServiceRegistration<?>> managed = new ConcurrentHashMap<>();
 
     @Activate
     private synchronized void activate(BundleContext bc, Config cfg) {
@@ -51,7 +56,7 @@ public class ServiceSpector implements ServiceListener {
 
         if (cfg.hide_services()) {
             hookReg = bundleContext.registerService(new String[] {FindHook.class.getName(), EventListenerHook.class.getName()},
-                new HidingHook(bundleContext, managed), null);
+                new HidingHook(bundleContext, this), null);
         }
 
         List<Filter> fl = new ArrayList<>(cfg.service_filters().length);
@@ -62,7 +67,9 @@ public class ServiceSpector implements ServiceListener {
                 e.printStackTrace();
             }
         }
-        filters = Collections.unmodifiableList(fl);
+        filters.clear();
+        filters.addAll(fl);
+        managed.clear();
 
         bundleContext.addServiceListener(this);
         visitExistingServices();
@@ -76,11 +83,11 @@ public class ServiceSpector implements ServiceListener {
     @Deactivate
     private synchronized void deactivate() {
         bundleContext.removeServiceListener(this);
-        filters = null;
         for (Map.Entry<ServiceReference<?>, ServiceRegistration<?>> entry : managed.entrySet()) {
             entry.getValue().unregister();
             bundleContext.ungetService(entry.getKey());
         }
+        filters.clear();
         managed.clear();
         bundleContext = null;
 
@@ -93,11 +100,12 @@ public class ServiceSpector implements ServiceListener {
     @Reference(policy=ReferencePolicy.DYNAMIC, cardinality=ReferenceCardinality.AT_LEAST_ONE)
     void bindServiceAspect(ServiceAspect sa) {
         aspects.add(sa);
+        System.out.println(sa.announce());
     }
 
     void unbindServiceAspect(ServiceAspect sa) {
         aspects.remove(sa);
-        sa.report();
+        System.out.println(sa.report());
     }
 
     List<ServiceAspect> getAspects() {
@@ -121,20 +129,11 @@ public class ServiceSpector implements ServiceListener {
         }
     }
 
-    private void handleRemovedService(ServiceReference<?> ref) {
-        ServiceRegistration<?> reg2 = managed.remove(ref);
-        if (reg2 != null) {
-            reg2.unregister();
-            bundleContext.ungetService(ref);
-        }
-    }
-
     private void handleNewService(ServiceReference<?> ref) {
         if (managed.get(ref) == null && ref.getProperty(PROXY_SERVICE_PROP) == null) {
-            Object svc = bundleContext.getService(ref);
             for (Filter filter : filters) {
                 if (filter.match(ref)) {
-                    managed.put(ref, registerProxy(ref, svc));
+                    handleMatchingService(ref);
                 }
             }
         }
@@ -146,12 +145,27 @@ public class ServiceSpector implements ServiceListener {
                 ServiceReference<?>[] refs = bundleContext.getServiceReferences((String) null, filter.toString());
                 if (refs != null) {
                     for (ServiceReference<?> ref : refs) {
-                        handleNewService(ref);
+                        handleMatchingService(ref);
                     }
                 }
             } catch (InvalidSyntaxException e) {
                 e.printStackTrace();
             }
+        }
+    }
+
+    private void handleMatchingService(ServiceReference<?> ref) {
+        if (managed.get(ref) == null && ref.getProperty(PROXY_SERVICE_PROP) == null) {
+            Object svc = bundleContext.getService(ref);
+            managed.put(ref, registerProxy(ref, svc));
+        }
+    }
+
+    private void handleRemovedService(ServiceReference<?> ref) {
+        ServiceRegistration<?> reg = managed.remove(ref);
+        if (reg != null) {
+            reg.unregister();
+            bundleContext.ungetService(ref);
         }
     }
 
@@ -207,13 +221,11 @@ public class ServiceSpector implements ServiceListener {
         PrototypeServiceFactory<Object> psf = new PrototypeServiceFactory<Object>() {
             @Override
             public Object getService(Bundle bundle, ServiceRegistration<Object> registration) {
-                Object originalService = bundle.getBundleContext().getService(originalRef);
-                return createProxy(originalRef.getBundle(), interfaces, originalService);
+                return createProxy(originalRef.getBundle(), interfaces, originalRef);
             }
 
             @Override
             public void ungetService(Bundle bundle, ServiceRegistration<Object> registration, Object service) {
-                bundle.getBundleContext().ungetService(originalRef);
             }
         };
 
@@ -222,15 +234,10 @@ public class ServiceSpector implements ServiceListener {
                 psf, newProps);
     }
 
-    private Object createProxy(Bundle bundle, List<Class<?>> interfaces, Object svc) {
+    private Object createProxy(Bundle bundle, List<Class<?>> interfaces, ServiceReference<?> ref) {
         BundleWiring bw = bundle.adapt(BundleWiring.class);
         ClassLoader cl = bw.getClassLoader();
         return Proxy.newProxyInstance(cl,
-                interfaces.toArray(new Class[]{}), new AllAspectsHandler(this, svc));
-    }
-
-    @interface Config {
-        String [] service_filters();
-        boolean hide_services() default false;
+                interfaces.toArray(new Class[]{}), new AllAspectsHandler(bundleContext, this, ref));
     }
 }

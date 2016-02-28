@@ -6,6 +6,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
 import org.coderthoughts.service.spector.ServiceAspect;
+import org.osgi.framework.ServiceReference;
 import org.osgi.service.component.annotations.Component;
 import org.osgi.service.component.annotations.ServiceScope;
 
@@ -14,24 +15,30 @@ public class CountingServiceAspect implements ServiceAspect {
     Map<String, LongAdder> invocationCounts = new ConcurrentHashMap<>();
 
     @Override
-    public void preServiceInvoke(Object service, Method method, Object[] args) throws Exception {
+    public String announce() {
+        return "Invocation counting started.\n";
+    }
+
+    @Override
+    public void preServiceInvoke(ServiceReference<?> service, Method method, Object[] args) {
         Class<?> declaringClass = method.getDeclaringClass();
         String key = declaringClass.getSimpleName() + "#" + method.getName();
         invocationCounts.computeIfAbsent(key, k -> new LongAdder()).increment();
     }
 
     @Override
-    public void postServiceInvoke(Object service, Method method, Object[] args, Object result) throws Exception {
+    public void postServiceInvoke(ServiceReference<?> service, Method method, Object[] args, Object result) {
         // nothing to do
     }
 
     @Override
-    public void report() {
-        System.out.println("Invocation counts");
-        System.out.println("=================");
+    public String report() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Invocation counts\n");
+        sb.append("=================\n");
         for (Map.Entry<String, LongAdder> entry : invocationCounts.entrySet()) {
-            System.out.println(entry.getKey() + ": " + entry.getValue());
+            sb.append(entry.getKey() + ": " + entry.getValue() + "\n");
         }
-        System.out.println();
+        return sb.toString();
     }
 }
